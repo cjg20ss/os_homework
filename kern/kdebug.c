@@ -155,7 +155,7 @@ debuginfo_eip(uintptr_t addr, struct Eipdebuginfo *info)
 		if (stabs[lfun].n_strx < stabstr_end - stabstr)
 			info->eip_fn_name = stabstr + stabs[lfun].n_strx;
 		info->eip_fn_addr = stabs[lfun].n_value;
-		addr -= info->eip_fn_addr;
+		addr -= info->eip_fn_addr;	// 这个是offset，不再是物理地址
 		// Search within the function definition for the line number.
 		lline = lfun;
 		rline = rfun;
@@ -179,7 +179,18 @@ debuginfo_eip(uintptr_t addr, struct Eipdebuginfo *info)
 	//	Look at the STABS documentation and <inc/stab.h> to find
 	//	which one.
 	// Your code here.
-
+	
+	// [lab1-exercise12]
+	// [参考资料]
+	// <https://www.jianshu.com/p/82c47da507d3>
+	// <https://www.cnblogs.com/wuhualong/p/lab01_exercise12_print_more_info.html>
+	stab_binsearch(stabs, &lline, &rline, N_SLINE, addr);
+	if (lline <= rline) {
+		info->eip_line = stabs[lline].n_desc;
+	} else {
+		// Couldn't find line stab
+		return -1;
+	}
 
 	// Search backwards from the line number for the relevant filename
 	// stab.

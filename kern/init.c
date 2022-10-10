@@ -19,6 +19,28 @@ test_backtrace(int x)
 	cprintf("leaving test_backtrace %d\n", x);
 }
 
+void 
+rainbow(int stride)
+{
+	static const char msg[] = "rainbow!";
+	for (int i = 0; i < COLOR_NUM; ++i) {
+		set_fgcolor(i);
+		set_bgcolor((i + stride) % COLOR_NUM);
+		cprintf("%c", msg[i % (sizeof(msg) - 1)]);
+	}
+	reset_fgcolor();
+	reset_bgcolor();	
+	cprintf("\n");
+}
+
+// test rainbow[lab1-challenge]
+void 
+test_rainbow()
+{
+	for(int i = 1; i < COLOR_NUM; ++i)
+		rainbow(i);
+}
+
 void
 i386_init(void)
 {

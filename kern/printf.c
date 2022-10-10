@@ -35,3 +35,42 @@ cprintf(const char *fmt, ...)
 	return cnt;
 }
 
+// [lab1-challenge]
+// 全局颜色状态的记录（类似attr）
+static int fgclr = -1;
+static int bgclr = -1;
+// 便于向cprintf的格式字符串中插入颜色数字
+static const char numbers[] = "0123456789";	// 便于向cprintf的格式字符串中插入颜色数字
+
+void 
+set_fgcolor(int clr) 
+{
+	fgclr = clr;
+	cprintf("\033[3%cm", numbers[clr]);
+}
+
+void
+set_bgcolor(int clr)
+{
+	bgclr = clr;
+	cprintf("\033[4%cm", numbers[clr]);
+}
+
+void 
+reset_fgcolor()
+{
+	cprintf("\033[0m");
+	if (bgclr != -1)
+		cprintf("\033[4%cm", numbers[bgclr]);
+	fgclr = -1;
+}
+
+void 
+reset_bgcolor()
+{
+	cprintf("\033[0m");
+	if (fgclr != -1)
+		cprintf("\033[3%cm", numbers[fgclr]);
+	bgclr = -1;
+}
+

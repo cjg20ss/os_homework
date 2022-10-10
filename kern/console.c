@@ -158,15 +158,15 @@ cga_init(void)
 }
 
 
-
+// 原本的cga_putc
 static void
-cga_putc(int c)
+cga_putc0(int c)
 {
 	// if no attribute given, then use black on white
 	if (!(c & ~0xFF))
 		c |= 0x0700;
 
-	switch (c & 0xff) {
+	switch (c & 0xff) {	// c只有低8位的值用于表示字符
 	case '\b':
 		if (crt_pos > 0) {
 			crt_pos--;
@@ -192,6 +192,8 @@ cga_putc(int c)
 	}
 
 	// What is the purpose of this?
+	// 当显示的内容超出一页时，把第一行的内容丢弃，后面n-1行向上平移
+	// 最后一行要用来与用户交互
 	if (crt_pos >= CRT_SIZE) {
 		int i;
 
@@ -208,6 +210,154 @@ cga_putc(int c)
 	outb(addr_6845 + 1, crt_pos);
 }
 
+static int
+isdigit(int c)
+{
+	return c >= '0' && c <= '9';
+}
+
+static int 
+atoi(const char* s)
+{
+	int res = 0;
+	for (int i = 0; isdigit(s[i]); ++i)
+		res = res * 10 + (s[i] - '0');
+	return res;
+}
+
+// Modify the VGA text-mode character attribute 'attr' 
+// based on the parameter contained in the buf.
+static void
+handle_ansi_esc_param(const char* buf, int len, int* attr)
+{
+	// 通过buf字符串，设置attr的低24位
+	// len用不到，通过buf最后一位不是数字字符就能判断长度
+
+	// white is light grey
+	// 这里的顺序要与/lib/stdio.h中color enum的顺序对应
+	static int ansi2cga[] = {0x0, 0x4, 0x2, 0xe, 0x1, 0x5, 0x3, 0x7};
+	int tmp_attr = *attr;
+	int n = atoi(buf);
+	if (n >= 30 && n <= 37) {	// 3表示设置foreground颜色
+		// 先将attr的1-4位 置0，再与颜色对应
+		tmp_attr = (tmp_attr & ~(0x0f)) | ansi2cga[n - 30];
+	} else if (n >= 40 && n <= 47) {	// 4表示设置background颜色
+		// 先将attr的5-8位 置0，再与颜色对应
+		tmp_attr = (tmp_attr & ~(0xf0)) | (ansi2cga[n - 40] << 4);
+	} else if (n == 0) {	// 黑底白字
+		tmp_attr = 0x07;
+	}
+	*attr = tmp_attr;
+}
+
+// The max length of one parameter.
+// Emmmmmm... no body will input 
+// a number parameter with length of 1023, probably.
+#define ESC_BUFSZ 1024
+
+// [lab1-challenge] VGA打印字符的文字颜色、背景颜色的设置。
+// [参考资料]
+// <https://zhuanlan.zhihu.com/p/261875958>
+
+// If the character is '\033' (esc), then buffer the input
+// until get a whole ANSI Esc Seq (and update the attribute) 
+// or get a false input midway.
+// Otherwise output it normally.
+// 
+// Use a deterministic finite automata:
+// 
+// [0]: '\033'	=> [1]
+// 		other	=> [0] + output the character
+// 
+// [1]: '\033'	=> [1]
+// 		'['		=> [2]
+// 		other	=> [0]
+// 
+// [2]: digit	=> [3] + begin record the modification
+// 		other	=> [0] + discard the modification
+// 
+// [3]: digit	=> [3]
+// 		';'		=> [2] + record the modification of attribute
+// 		'm'		=> [0] + update the attribute
+// 		other 	=> [0] + discard the modification
+//
+// 我对该状态机的理解：
+// [0]状态：已打开字符输出
+// [1]状态：已关闭字符输出
+// [2]状态：输入参数
+// [3]状态：继续上一个参数的输入过程
+//         or 令刚输入的参数被记录（没有用m或;作为结尾的参数不会被记录在esc_attr中）
+// m把当前输入的参数记录在esc_attr中，并将esc_attr中的参数交给attr从而能够生效。        
+// ;把当前输入的参数记录在esc_attr中。        
+// 
+// "\033[<字符显示的方式>;<字符的颜色>;<字符的背景颜色>m<需要显示的字符>"
+static void 
+cga_putc(int c)
+{
+	static int state = 0;
+	static char esc_buf[ESC_BUFSZ];
+	static int esc_len = 0;
+	static int attr = 0; // default attribute.
+	static int esc_attr = 0;
+
+	switch(state) {
+	case 0: {
+		if ((char)c == '\033') {
+			state = 1;
+		} else {
+			cga_putc0((attr << 8) | (c & 0xff));	// 输出字符的高24位就是attr的低24位，低8位就是c的低8位
+		}
+		break;
+	}
+	case 1: {
+		if ((char)c == '[') {
+			esc_attr = attr;
+			state = 2;
+		} else if ((char)c != '\033') {
+			state = 0;
+		}
+		break;
+	}
+	case 2: {
+		if (isdigit(c)) {
+			esc_buf[esc_len++] = (char)c;
+			state = 3;
+		} else {
+			// discard modification
+			esc_len = 0;
+
+			state = 0;
+		}
+		break;
+	}
+	case 3: {
+		if (isdigit(c)) {
+			esc_buf[esc_len++] = (char)c;
+		} else if ((char)c == ';') {
+			// record current modification
+			esc_buf[esc_len++] = 0;
+			handle_ansi_esc_param(esc_buf, esc_len, &esc_attr);
+			esc_len = 0;
+
+			state = 2;
+		} else if ((char)c == 'm') {
+			// update the attribute
+			esc_buf[esc_len++] = 0;
+			handle_ansi_esc_param(esc_buf, esc_len, &esc_attr);
+			esc_len = 0;
+			attr = esc_attr;
+
+			state = 0;
+		} else {
+			// discard modification
+			esc_len = 0;
+
+			state = 0;
+		}
+		break;
+	}
+	}
+}
 
 /***** Keyboard input code *****/
 
