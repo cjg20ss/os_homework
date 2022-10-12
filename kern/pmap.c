@@ -434,7 +434,39 @@ pte_t *
 pgdir_walk(pde_t *pgdir, const void *va, int create)
 {
 	// Fill this function in
-	return NULL;
+	// return NULL;
+
+	// [lab2-exercise1]
+	// 参考资料
+	// <https://blog.csdn.net/qhaaha/article/details/111430350>
+
+	size_t pdx = PDX(va);	// 页目录中的索引
+	size_t ptx = PTX(va);	// 页表中的索引
+
+	if (pgdir[pdx]) {	// 页目录中找到了第pdx项
+		physaddr_t pt_pa = PTE_ADDR(pgdir[pdx]);	// 该PDE项的高20位表示PT的起始物理地址的高20位
+		physaddr_t pte_pa = pt_pa + ptx * sizeof(pte_t);	// 找到该PT的第ptx项的物理地址
+		pte_t *pte_va = (pte_t *) KADDR(pte_pa);	// 把PTE的物理地址转换成虚拟地址
+		// cprintf("[debug] 找到pde，进而尝试寻找pte\n");
+		return pte_va;
+	} else if (!create) {	// 页目录中找不到第pdx项，且不创建该页表
+		// cprintf("[debug] pgdir[pdx] == 0x00000000，没找到pde\n");
+		return NULL;
+	} else {	// 页目录中找不到第pdx项，创建该页表
+		struct PageInfo *allocated_page = page_alloc(ALLOC_ZERO);
+		if (!allocated_page) {	// page_alloc没有成功分配物理页
+			// cprintf("[debug] 没找到pde，且没有内存分配新页表\n");
+			return NULL;
+		}
+		// cprintf("[debug] 没找到pde，因此创建新页表\n");
+		allocated_page->pp_ref++;
+		pgdir[pdx] = page2pa(allocated_page) | PTE_P | PTE_U | PTE_W;	// 填入新分配的物理页的起始物理地址
+
+		physaddr_t pt_pa = PTE_ADDR(pgdir[pdx]);	// 该PDE项的高20位表示PT的起始物理地址的高20位
+		physaddr_t pte_pa = pt_pa + ptx * sizeof(pte_t);	// 找到该PT的第ptx项的物理地址
+		pte_t *pte_va = (pte_t *) KADDR(pte_pa);	// 把PTE的物理地址转换成虚拟地址
+		return pte_va;
+	}
 }
 
 //
@@ -452,6 +484,21 @@ static void
 boot_map_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm)
 {
 	// Fill this function in
+
+	// [lab2-exercise1]
+	// 参考资料
+	// <https://blog.csdn.net/qhaaha/article/details/111430350>
+
+	assert(!(size % PGSIZE) && !(va % PGSIZE) && !(pa % PGSIZE));
+
+	// va => pa
+	// va + PGSIZE => pa + PGSIZE
+	// ...
+	// va + size - PGSIZE => pa + size - PGSIZE
+	for (size_t i = 0; i < size; i += PGSIZE) {
+		pte_t* pte_va = pgdir_walk(pgdir, (void *)(va + i), 1);
+		*pte_va = (pa + i) | perm | PTE_P;
+	}
 }
 
 //
@@ -483,6 +530,27 @@ int
 page_insert(pde_t *pgdir, struct PageInfo *pp, void *va, int perm)
 {
 	// Fill this function in
+	// return 0;
+
+	// [lab2-exercise1]
+	// 参考资料
+	// <https://blog.csdn.net/qhaaha/article/details/111430350>
+
+	pte_t *pte_va = pgdir_walk(pgdir, va, 1);
+	if (!pte_va) {	// 没有内存分配新页表
+		return -E_NO_MEM;
+	}
+
+	// 页表中已经把va映射到了物理页pp的情形
+	// if (PTE_ADDR(*pte_va) == page2pa(pp)) {
+	// 	*pte_va = PTE_ADDR(*pte_va) | perm | PTE_P;
+	// 	return 0;
+	// }
+	
+	// 先让pp_ref增加再page_remove，以防止page_remove的时候ref变成0而直接释放该页
+	pp->pp_ref++;
+	page_remove(pgdir, va);
+	*pte_va = page2pa(pp) | perm | PTE_P;	// 把va映射到物理页pp
 	return 0;
 }
 
@@ -501,7 +569,21 @@ struct PageInfo *
 page_lookup(pde_t *pgdir, void *va, pte_t **pte_store)
 {
 	// Fill this function in
-	return NULL;
+	// return NULL;
+
+	// [lab2-exercise1]
+	// 参考资料
+	// <https://blog.csdn.net/qhaaha/article/details/111430350>
+
+	pte_t *pte_va = pgdir_walk(pgdir, va, 0);
+	if (pte_va && *pte_va) {	// 能找到pte项且其中记录的物理页地址有效
+		if (pte_store) {	// 如果指针pte_store不为NULL，就把pte_va存到该指针
+			*pte_store = pte_va;
+		}
+		return pa2page(PTE_ADDR(*pte_va));	// 把物理地址转换成PageInfo*返回
+	} else {	// 没有物理页被映射到va
+		return NULL;
+	}
 }
 
 //
@@ -523,6 +605,19 @@ void
 page_remove(pde_t *pgdir, void *va)
 {
 	// Fill this function in
+
+	// [lab2-exercise1]
+	// 参考资料
+	// <https://blog.csdn.net/qhaaha/article/details/111430350>
+	
+	pte_t *pte;
+	struct PageInfo *va_page = page_lookup(pgdir, va, &pte);	// 找到va对应的物理页
+	if (!va_page) {	// va没有映射到物理页
+		return;
+	}
+	page_decref(va_page);	// va映射到的物理页的ref减少（如果减为0就释放）
+	*pte = 0;	// 去除va的映射
+	tlb_invalidate(pgdir, va);	// tlb中也去除va的映射（如果有的话）
 }
 
 //
@@ -789,13 +884,13 @@ check_va2pa(pde_t *pgdir, uintptr_t va)
 {
 	pte_t *p;
 
-	pgdir = &pgdir[PDX(va)];
-	if (!(*pgdir & PTE_P))
-		return ~0;
-	p = (pte_t*) KADDR(PTE_ADDR(*pgdir));
-	if (!(p[PTX(va)] & PTE_P))
-		return ~0;
-	return PTE_ADDR(p[PTX(va)]);
+	pgdir = &pgdir[PDX(va)];	// PDE的地址
+	if (!(*pgdir & PTE_P))	// 该PDE项的存在位PTE_P为0
+		return ~0;			// 返回0xFFFFFFFF
+	p = (pte_t*) KADDR(PTE_ADDR(*pgdir));	// PT的起始地址
+	if (!(p[PTX(va)] & PTE_P))	// 该PTE项的存在位PTE_P为0
+		return ~0;			// 返回0xFFFFFFFF
+	return PTE_ADDR(p[PTX(va)]);	// 返回物理页的起始物理地址
 }
 
 
@@ -811,6 +906,7 @@ check_page(void)
 	extern pde_t entry_pgdir[];
 
 	// should be able to allocate three pages
+	// 检验分配3个物理页的行为
 	pp0 = pp1 = pp2 = 0;
 	assert((pp0 = page_alloc(0)));
 	assert((pp1 = page_alloc(0)));
@@ -825,15 +921,22 @@ check_page(void)
 	page_free_list = 0;
 
 	// should be no free memory
+	// 检验物理页不够分配时的边界情况
 	assert(!page_alloc(0));
 
+	// 到目前为止，kern_pgdir中的内容为全0，除了kern_pgdir[PDX(UVPT)] = PADDR(kern_pgdir) | PTE_U | PTE_P;
+
 	// there is no page allocated at address 0
+	// 因为kern_pgdir[PDX(0x0)] == 0，表示PDX(0x0)对应的PDE找不到（无效）
 	assert(page_lookup(kern_pgdir, (void *) 0x0, &ptep) == NULL);
 
 	// there is no free memory, so we can't allocate a page table
+	// page_free_list里面没有空闲物理页，因此page_insert失败
 	assert(page_insert(kern_pgdir, pp1, 0x0, PTE_W) < 0);
 
 	// free pp0 and try again: pp0 should be used for page table
+	// 释放pp0，因此为了把虚拟地址0x0映射到物理页pp1，需要分配pp0作为相关的页表
+	// 把虚拟地址0x0映射到物理页pp1
 	page_free(pp0);
 	assert(page_insert(kern_pgdir, pp1, 0x0, PTE_W) == 0);
 	assert(PTE_ADDR(kern_pgdir[0]) == page2pa(pp0));
@@ -856,18 +959,19 @@ check_page(void)
 
 	// pp2 should NOT be on the free list
 	// could happen in ref counts are handled sloppily in page_insert
+	// 如果page_insert的实现中，不是先让ref增加，再page_remove，就可能使ref为1的物理页在page_remove的过程中被放入page_free_list。
 	assert(!page_alloc(0));
 
 	// check that pgdir_walk returns a pointer to the pte
-	ptep = (pte_t *) KADDR(PTE_ADDR(kern_pgdir[PDX(PGSIZE)]));
-	assert(pgdir_walk(kern_pgdir, (void*)PGSIZE, 0) == ptep+PTX(PGSIZE));
+	ptep = (pte_t *) KADDR(PTE_ADDR(kern_pgdir[PDX(PGSIZE)]));	// PT起始物理地址对应的虚拟地址
+	assert(pgdir_walk(kern_pgdir, (void*)PGSIZE, 0) == ptep+PTX(PGSIZE));	// 等式右边：PTE的虚拟地址
 
 	// should be able to change permissions too.
 	assert(page_insert(kern_pgdir, pp2, (void*) PGSIZE, PTE_W|PTE_U) == 0);
 	assert(check_va2pa(kern_pgdir, PGSIZE) == page2pa(pp2));
 	assert(pp2->pp_ref == 1);
-	assert(*pgdir_walk(kern_pgdir, (void*) PGSIZE, 0) & PTE_U);
-	assert(kern_pgdir[0] & PTE_U);
+	assert(*pgdir_walk(kern_pgdir, (void*) PGSIZE, 0) & PTE_U);	// 检验PTE项的PTE_U位为1
+	assert(kern_pgdir[0] & PTE_U);	// 检验PDE项的PTE_U位为1
 
 	// should be able to remap with fewer permissions
 	assert(page_insert(kern_pgdir, pp2, (void*) PGSIZE, PTE_W) == 0);
@@ -917,6 +1021,7 @@ check_page(void)
 	assert(!page_alloc(0));
 
 	// forcibly take pp0 back
+	// pp0是第0个PT
 	assert(PTE_ADDR(kern_pgdir[0]) == page2pa(pp0));
 	kern_pgdir[0] = 0;
 	assert(pp0->pp_ref == 1);
@@ -926,18 +1031,18 @@ check_page(void)
 	page_free(pp0);
 	va = (void*)(PGSIZE * NPDENTRIES + PGSIZE);
 	ptep = pgdir_walk(kern_pgdir, va, 1);
-	ptep1 = (pte_t *) KADDR(PTE_ADDR(kern_pgdir[PDX(va)]));
-	assert(ptep == ptep1 + PTX(va));
+	ptep1 = (pte_t *) KADDR(PTE_ADDR(kern_pgdir[PDX(va)]));	// PT起始物理地址对应的虚拟地址
+	assert(ptep == ptep1 + PTX(va));	// 等式右边是指针算术，等式左边是我们实现的pgdir_walk的结果
 	kern_pgdir[PDX(va)] = 0;
 	pp0->pp_ref = 0;
 
 	// check that new page tables get cleared
-	memset(page2kva(pp0), 0xFF, PGSIZE);
+	memset(page2kva(pp0), 0xFF, PGSIZE);	// 用于测试page_walk对新分配的页表是否会清0
 	page_free(pp0);
-	pgdir_walk(kern_pgdir, 0x0, 1);
+	pgdir_walk(kern_pgdir, 0x0, 1);	// 会分配物理页pp0作为第0号页表，且会清0
 	ptep = (pte_t *) page2kva(pp0);
 	for(i=0; i<NPTENTRIES; i++)
-		assert((ptep[i] & PTE_P) == 0);
+		assert((ptep[i] & PTE_P) == 0);	// 如果清0了，那么PTE_P位就是0而不是1
 	kern_pgdir[0] = 0;
 	pp0->pp_ref = 0;
 
