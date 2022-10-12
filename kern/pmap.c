@@ -92,7 +92,7 @@ boot_alloc(uint32_t n)
 	// which points to the end of the kernel's bss segment:
 	// the first virtual address that the linker did *not* assign
 	// to any kernel code or global variables.
-	if (!nextfree) {
+	if (!nextfree) {	// 这里对static变量nextfree做初始化
 		extern char end[];
 		nextfree = ROUNDUP((char *) end, PGSIZE);
 	}
@@ -103,7 +103,32 @@ boot_alloc(uint32_t n)
 	//
 	// LAB 2: Your code here.
 
-	return NULL;
+	// return NULL;
+	
+	// [lab2-exercise1]
+	// 参考资料
+	// <https://blog.csdn.net/qhaaha/article/details/111430350>
+	if (n > 0) {
+		// ROUNDUP的含义：以n是0-1023之间的数为例。
+		// 如果n是0，那么已经对齐，ROUNDUP之后还是0；
+		// 如果n是1-1023，那么没有对齐，ROUNDUP之后变成1024。
+		size_t allocated_size = ROUNDUP(n, PGSIZE);	// 分配若干物理页的空间，以容纳nB空间
+		if (nextfree + allocated_size > (char *)KERNBASE + npages * PGSIZE) {
+			// 强制类型转换为char*是因为这里的表达式是base+offset的形式，
+			// base是某个Byte的地址，offset是偏移Byte的个数。
+			panic("boot_alloc: run out of memory!\n");
+		} else {
+			result = nextfree;
+			nextfree += allocated_size;
+		}
+
+	} else if (n == 0) {
+		result = nextfree;
+	} else {	// n < 0
+		panic("boot_alloc: n should not be a negative number!\n");
+	}
+
+	return result;
 }
 
 // Set up a two-level page table:
@@ -124,8 +149,8 @@ mem_init(void)
 	// Find out how much memory the machine has (npages & npages_basemem).
 	i386_detect_memory();
 
-	// Remove this line when you're ready to test this function.
-	panic("mem_init: This function is not finished\n");
+	// // Remove this line when you're ready to test this function.
+	// panic("mem_init: This function is not finished\n");
 
 	//////////////////////////////////////////////////////////////////////
 	// create initial page directory.
@@ -135,11 +160,14 @@ mem_init(void)
 	//////////////////////////////////////////////////////////////////////
 	// Recursively insert PD in itself as a page table, to form
 	// a virtual page table at virtual address UVPT.
-	// (For now, you don't have understand the greater purpose of the
+	// (For now, you don't have to understand the greater purpose of the
 	// following line.)
 
 	// Permissions: kernel R, user R
 	kern_pgdir[PDX(UVPT)] = PADDR(kern_pgdir) | PTE_U | PTE_P;
+	// 向页目录Page Directory的第UVPT[31:22]个PDE项的高20位填入页目录的物理地址
+	// 这一项相当于是页目录项PDE指向页目录PD自己，而不是指向某个PT页表。
+	// 最后打开PTE_U和PTE_P标志位。
 
 	//////////////////////////////////////////////////////////////////////
 	// Allocate an array of npages 'struct PageInfo's and store it in 'pages'.
@@ -149,6 +177,15 @@ mem_init(void)
 	// to initialize all fields of each struct PageInfo to 0.
 	// Your code goes here:
 
+	// [lab2-exercise1]
+	// 参考资料
+	// <https://blog.csdn.net/qhaaha/article/details/111430350>
+
+	// 分配一个由npages个PageInfo结构体组成的数组，并初始化为全0。
+	// 这个数组反映了物理页的状态信息，内核据此跟踪、管理物理页。
+	size_t page_info_list_size = npages * sizeof(struct PageInfo);
+	pages = (struct PageInfo *)boot_alloc(page_info_list_size);	// pages是全局变量
+	memset(pages, 0, page_info_list_size);
 
 	//////////////////////////////////////////////////////////////////////
 	// Now that we've allocated the initial kernel data structures, we set
@@ -251,8 +288,44 @@ page_init(void)
 	// Change the code to reflect this.
 	// NB: DO NOT actually touch the physical memory corresponding to
 	// free pages!
-	size_t i;
-	for (i = 0; i < npages; i++) {
+
+	// [lab2-exercise1]
+	// 参考资料
+	// <https://blog.csdn.net/qhaaha/article/details/111430350>
+	
+	size_t i;	// i是遍历整个page_info_list的索引
+	page_free_list = NULL;	// 理论上static变量的初值就是0，不需要初始化
+
+	// 1) 物理页0要预留，用于存储实模式IDT和BIOS数据结构
+	pages[0].pp_ref = 1;
+	pages[0].pp_link = NULL;	// pp_link域表示page_free_list中的下一个节点
+
+	// 2) 基础内存的剩余部分 [PGSIZE, npages_basemem * PGSIZE) 可用
+	for (i = 1; i < npages_basemem; i++) {
+		pages[i].pp_ref = 0;
+
+		// 把新节点插到链表头部之前成为新的头部								
+		pages[i].pp_link = page_free_list;	// 令新节点的link指向链表原来的头指针
+		page_free_list = &pages[i];			// 链表新的头指针指向新节点
+	}
+
+	// 3) IO hole [IOPHYSMEM, EXTPHYSMEM) 需要预留
+	size_t npages_IOPHYSMEM = IOPHYSMEM / PGSIZE;
+	size_t npages_EXTPHYSMEM = EXTPHYSMEM / PGSIZE;
+
+	for (i = npages_IOPHYSMEM; i < npages_EXTPHYSMEM; i++) {
+		pages[0].pp_ref = 1;
+		pages[0].pp_link = NULL;
+	}
+
+	// 4) 扩展内存 [EXTPHYSMEM, ...) 中前面若干个连续的物理页已分配，剩余的物理页可用
+	size_t npages_free_begin_index = ((size_t)boot_alloc(0) - KERNBASE) / PGSIZE;
+	
+	for (i = npages_EXTPHYSMEM; i < npages_free_begin_index; i++) {
+		pages[i].pp_ref = 1;
+		pages[i].pp_link = NULL;
+	}
+	for (i = npages_free_begin_index; i < npages; i++) {
 		pages[i].pp_ref = 0;
 		pages[i].pp_link = page_free_list;
 		page_free_list = &pages[i];
@@ -275,7 +348,29 @@ struct PageInfo *
 page_alloc(int alloc_flags)
 {
 	// Fill this function in
-	return 0;
+
+	// [lab2-exercise1]
+	// 参考资料
+	// <https://blog.csdn.net/qhaaha/article/details/111430350>
+
+	struct PageInfo * freepage;
+
+	if (page_free_list) {
+		freepage = page_free_list;
+		page_free_list = page_free_list->pp_link;
+		freepage->pp_link = NULL;
+
+		if (alloc_flags & ALLOC_ZERO) {
+			// page2kva传入的是一个PageInfo结构体的指针
+			// 函数内完成了 PageInfo* => pa => kva 的转换
+
+			// 程序里能够操纵的地址都是va虚拟地址。
+			memset(page2kva(freepage), '\0', PGSIZE);
+		}
+		return freepage;
+	} else {
+		return NULL;
+	}
 }
 
 //
@@ -288,6 +383,18 @@ page_free(struct PageInfo *pp)
 	// Fill this function in
 	// Hint: You may want to panic if pp->pp_ref is nonzero or
 	// pp->pp_link is not NULL.
+
+	// [lab2-exercise1]
+	// 参考资料
+	// <https://blog.csdn.net/qhaaha/article/details/111430350>
+
+	if (pp->pp_ref || pp->pp_link) {
+		panic("page_free: pp->pp_ref is nonzero or pp->pp_link is not NULL.");
+	}
+
+	// 把pp节点插入到链表的头节点之前，并更新头节点。 
+	pp->pp_link = page_free_list;
+	page_free_list = pp;
 }
 
 //
@@ -452,6 +559,32 @@ check_page_free_list(bool only_low_memory)
 	if (only_low_memory) {
 		// Move pages with lower addresses first in the free
 		// list, since entry_pgdir does not map all pages.
+
+		// 这段代码有点搞脑子
+		// 语法上，理解这个循环的要点是：
+		// 假设 int a = 0, b = 1;
+		// a = b;	// 这个代码让a的值变成1
+		// a = 2;	// 这个代码让a的值变成2。（重要的是，b的值不会变成2）
+		// 应该理解为：把2这个值写入&a。即 *(&a) = 2。
+		// 不能理解为：因为a==b，所以a=2就等同于b=2。
+		// （不能这么解释，因为&a != &b）
+
+		// 把上面的情景延伸到链表：
+		// 假设 Node *a, *b, *c;（class Node{ int data; Node* link; }）
+		// *a = Node(0, NULL); *b = Node(1, NULL); *c = Node(2, NULL);
+		// a->link = b;	// 这个代码让a指向b
+		// c->link = a->link; // 这个代码让c指向b
+		// c->link = a;	// 这个代码让c指向a。（重要的是，a不会因此而指向a）
+		// 应该理解为：把a这个地址写入&(c->link)。即 *(&(c->link)) = a。
+		// 不能理解为：因为c->link==a->link，所以c->link=a就等同于a->link=a。
+		// （不能这么解释，因为&(c->link) != &(a->link)）
+		// 本质：c->link是一个变量，虽然它在上一刻的值与a->link相同，但它们是不同的变量。
+
+		// 下面的循环，就是把page_free_list中的节点根据其对应物理页的起始物理地址的PDX部分是为0还是非0分成两类
+		// 两类节点分别加到pp1和pp2中，加的过程也是加到链表头之前并更新头。
+
+		// 循环外的两个赋值语句是收尾。相当于是 pp1 -> pp2 -> NULL ，把两个链表串起来
+		// 这样处理之后，page_free_list前面部分的节点就是pp1的节点，也就是所谓的low memory pages
 		struct PageInfo *pp1, *pp2;
 		struct PageInfo **tp[2] = { &pp1, &pp2 };
 		for (pp = page_free_list; pp; pp = pp->pp_link) {
@@ -473,15 +606,22 @@ check_page_free_list(bool only_low_memory)
 	first_free_page = (char *) boot_alloc(0);
 	for (pp = page_free_list; pp; pp = pp->pp_link) {
 		// check that we didn't corrupt the free list itself
+
+		// 检验page_free_list中的PageInfo*都处在[(void*)pages, (void*)pages+npages*sizeof(PageInfo))中
 		assert(pp >= pages);
 		assert(pp < pages + npages);
+		// 并且该PageInfo*和(void*)pages的差值应该为sizeof(PageInfo)的整数倍
 		assert(((char *) pp - (char *) pages) % sizeof(*pp) == 0);
 
 		// check a few pages that shouldn't be on the free list
+
+		// 物理页0不可用
 		assert(page2pa(pp) != 0);
+		// IO空洞不可用
 		assert(page2pa(pp) != IOPHYSMEM);
 		assert(page2pa(pp) != EXTPHYSMEM - PGSIZE);
 		assert(page2pa(pp) != EXTPHYSMEM);
+		// 可用的物理页起始地址应该<IO空洞 或者 >= free_page_list的第一个可用页的起始地址
 		assert(page2pa(pp) < EXTPHYSMEM || (char *) page2kva(pp) >= first_free_page);
 
 		if (page2pa(pp) < EXTPHYSMEM)
@@ -490,6 +630,7 @@ check_page_free_list(bool only_low_memory)
 			++nfree_extmem;
 	}
 
+	// 基础内存和扩展内存中都应该有可用页
 	assert(nfree_basemem > 0);
 	assert(nfree_extmem > 0);
 
@@ -509,6 +650,7 @@ check_page_alloc(void)
 	char *c;
 	int i;
 
+	// pages应该被分配内存，其起始地址不应为NULL
 	if (!pages)
 		panic("'pages' is a null pointer!");
 
@@ -517,6 +659,7 @@ check_page_alloc(void)
 		++nfree;
 
 	// should be able to allocate three pages
+	// 检验分配3个物理页的行为
 	pp0 = pp1 = pp2 = 0;
 	assert((pp0 = page_alloc(0)));
 	assert((pp1 = page_alloc(0)));
@@ -530,6 +673,7 @@ check_page_alloc(void)
 	assert(page2pa(pp2) < npages*PGSIZE);
 
 	// temporarily steal the rest of the free pages
+	// 检验物理页不够分配时的边界情况
 	fl = page_free_list;
 	page_free_list = 0;
 
@@ -537,6 +681,7 @@ check_page_alloc(void)
 	assert(!page_alloc(0));
 
 	// free and re-allocate?
+	// 检验物理页的释放与重新分配
 	page_free(pp0);
 	page_free(pp1);
 	page_free(pp2);
@@ -550,10 +695,18 @@ check_page_alloc(void)
 	assert(!page_alloc(0));
 
 	// test flags
+	// 测试分配物理页时是否有做合理的初始化
 	memset(page2kva(pp0), 1, PGSIZE);
 	page_free(pp0);
 	assert((pp = page_alloc(ALLOC_ZERO)));
 	assert(pp && pp0 == pp);
+
+	// cprintf("[debug] %u\n", pp);
+	// cprintf("[debug] %u\n", pp0);
+	// cprintf("[debug] %u\n", pp && pp0);
+	// && 运算符会认为非0为真，0为假
+	// C语言没有bool类型，&& 的运算结果中，真为1，假为0
+	
 	c = page2kva(pp);
 	for (i = 0; i < PGSIZE; i++)
 		assert(c[i] == 0);
@@ -567,6 +720,7 @@ check_page_alloc(void)
 	page_free(pp2);
 
 	// number of free pages should be the same
+	// 分配和释放之后，检查可用物理页的个数
 	for (pp = page_free_list; pp; pp = pp->pp_link)
 		--nfree;
 	assert(nfree == 0);
