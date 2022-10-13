@@ -54,6 +54,8 @@ i386_detect_memory(void)
 
 	cprintf("Physical memory: %uK available, base = %uK, extended = %uK\n",
 		totalmem, basemem, totalmem - basemem);
+	// totalmem = 131072K, base = 640K
+	// npages = 32K, npages_basemem = 160
 }
 
 
@@ -95,6 +97,14 @@ boot_alloc(uint32_t n)
 	if (!nextfree) {	// 这里对static变量nextfree做初始化
 		extern char end[];
 		nextfree = ROUNDUP((char *) end, PGSIZE);
+		// cprintf("[debug] (va)end = (va)0x%08x\n", end);
+		// cprintf("[debug] (va)nextfree = (va)0x%08x\n", nextfree);
+		// (va)end = 0xf011bb20		这个值来自 kern/kernel.ld
+		// (va)nextfree = 0xf011c000
+		
+		// extern char edata[];
+		// cprintf("[debug] (va)edata = (va)0x%08x\n", edata);
+		// (va)edata = 0xf011b0c0	这个值来自 kern/kernel.ld 		.bss段的起始地址
 	}
 
 	// Allocate a chunk large enough to hold 'n' bytes, then update
@@ -156,6 +166,8 @@ mem_init(void)
 	// create initial page directory.
 	kern_pgdir = (pde_t *) boot_alloc(PGSIZE);
 	memset(kern_pgdir, 0, PGSIZE);
+	// cprintf("[debug] (va)kern_pgdir = (va)0x%08x, (pa)PADDR(kern_pgdir) = (pa)0x%08x\n", kern_pgdir, PADDR(kern_pgdir));
+	// kern_pgdir: va->0xf011c000 pa->0x0011c000
 
 	//////////////////////////////////////////////////////////////////////
 	// Recursively insert PD in itself as a page table, to form
@@ -183,7 +195,10 @@ mem_init(void)
 
 	// 分配一个由npages个PageInfo结构体组成的数组，并初始化为全0。
 	// 这个数组反映了物理页的状态信息，内核据此跟踪、管理物理页。
-	size_t page_info_list_size = npages * sizeof(struct PageInfo);
+
+	// cprintf("[debug] sizeof(struct PageInfo) = %u\n", sizeof(struct PageInfo));
+	// sizeof(struct PageInfo) = 8
+	size_t page_info_list_size = npages * sizeof(struct PageInfo);	// (32K)*8 = 128K
 	pages = (struct PageInfo *)boot_alloc(page_info_list_size);	// pages是全局变量
 	memset(pages, 0, page_info_list_size);
 
@@ -210,6 +225,24 @@ mem_init(void)
 	//    - pages itself -- kernel RW, user NONE
 	// Your code goes here:
 
+	// [lab2-exercise5]
+	// 参考资料
+	// <https://blog.csdn.net/qhaaha/article/details/111430350>
+	// <https://blog.csdn.net/weixin_39820173/article/details/111124630>
+
+	boot_map_region(kern_pgdir, UPAGES, PTSIZE, PADDR(pages), PTE_U);
+	// page2pa(pages): pages指针对应的物理页，求该物理页的起始物理地址，也就是0。
+	// PADDR(pages): pages指针的值作为虚拟地址，求出该虚拟地址所对应的物理地址。
+	// 根据UPAGES的定义，虚拟地址[UPAGES, UPAGES+PTSIZE)映射到pages数据结构。用户只读。
+	// pages的大小是 物理页个数 * sizeof(struct PageInfo) = (32K) * 8 = 128K
+	// PTSIZE = PGSIZE * NPENTRIES = 4K * 1K = 4M
+	// 内核中的pages的映射在第3个boot_map_region中一起完成。
+
+	// cprintf("[debug] va[UPAGES, UVPT) = va[0x%08x, 0x%08x)\n", UPAGES, UVPT);
+	// cprintf("[debug] pa[PADDR(pages), PADDR(pages)+PTSIZE) = pa[0x%08x, 0x%08x)\n", PADDR(pages), PADDR(pages)+PTSIZE);
+	// 供用户读取的pages列表信息区域UPAGES（内核pages列表在UPAGES处的映像）
+	// pa[0x0011d000, 0x0051d000) va[0xef000000, 0xef400000)=[UPAGES, UVPT)
+
 	//////////////////////////////////////////////////////////////////////
 	// Use the physical memory that 'bootstack' refers to as the kernel
 	// stack.  The kernel stack grows down from virtual address KSTACKTOP.
@@ -222,6 +255,22 @@ mem_init(void)
 	//     Permissions: kernel RW, user NONE
 	// Your code goes here:
 
+	// [lab2-exercise5]
+	// 参考资料
+	// <https://blog.csdn.net/qhaaha/article/details/111430350>
+	// <https://blog.csdn.net/weixin_39820173/article/details/111124630>
+
+	boot_map_region(kern_pgdir, KSTACKTOP-KSTKSIZE, KSTKSIZE, PADDR(bootstack), PTE_W | PTE_P);
+	// guard page不需要映射。如果内核栈超过了[KSTACKTOP-KSTKSIZE, KSTACKTOP)而进入guard page的范围会报错。
+	// 权限：内核读写
+
+	// cprintf("[debug] PADDR(bootstacktop)-KSTKSIZE = %08x\n", PADDR(bootstacktop)-KSTKSIZE);
+	// cprintf("[debug] PADDR(bootstack) = %08x\n", PADDR(bootstack));
+	// 都是0x00110000
+	// 内核栈: pa[0x00110000, 0x00118000) va[0xefff8000, 0xf0000000)=[KSTACKTOP-KSTKSIZE, KSTKSIZE)
+	// (注：KSTACKTOP = KERNBASE = 0xf0000000, KSTKSIZE = 8*PGSIZE, PGSIZE = 4K)
+	// 这个值来自 kern/entry.S
+
 	//////////////////////////////////////////////////////////////////////
 	// Map all of physical memory at KERNBASE.
 	// Ie.  the VA range [KERNBASE, 2^32) should map to
@@ -230,6 +279,14 @@ mem_init(void)
 	// we just set up the mapping anyway.
 	// Permissions: kernel RW, user NONE
 	// Your code goes here:
+
+	// [lab2-exercise5]
+	// 参考资料
+	// <https://blog.csdn.net/qhaaha/article/details/111430350>
+	// <https://blog.csdn.net/weixin_39820173/article/details/111124630>
+	
+	boot_map_region(kern_pgdir, KERNBASE, ~(uint32_t)0 - KERNBASE + 1, 0, PTE_W);
+	// 内核: pa[0x00000000, 0x10000000) va[0xf0000000, 4G)=[KERNBASE, 4G)
 
 	// Check that the initial page directory has been set up correctly.
 	check_kern_pgdir();
@@ -319,8 +376,11 @@ page_init(void)
 	}
 
 	// 4) 扩展内存 [EXTPHYSMEM, ...) 中前面若干个连续的物理页已分配，剩余的物理页可用
-	size_t npages_free_begin_index = ((size_t)boot_alloc(0) - KERNBASE) / PGSIZE;
-	
+	size_t npages_free_begin_index = (size_t) PGNUM(PADDR(boot_alloc(0)));
+	// cprintf("[debug] npages_free_begin_index: %08x\n", npages_free_begin_index);
+	// cprintf("[debug] npages_free_begin_index + 256: %08x\n", npages_free_begin_index + 256);
+	// cprintf("[debug] : %08x\n", (size_t) (pa2page(PADDR(boot_alloc(0))) - pages));
+
 	for (i = npages_EXTPHYSMEM; i < npages_free_begin_index; i++) {
 		pages[i].pp_ref = 1;
 		pages[i].pp_link = NULL;
@@ -436,14 +496,14 @@ pgdir_walk(pde_t *pgdir, const void *va, int create)
 	// Fill this function in
 	// return NULL;
 
-	// [lab2-exercise1]
+	// [lab2-exercise4]
 	// 参考资料
 	// <https://blog.csdn.net/qhaaha/article/details/111430350>
 
 	size_t pdx = PDX(va);	// 页目录中的索引
 	size_t ptx = PTX(va);	// 页表中的索引
 
-	if (pgdir[pdx]) {	// 页目录中找到了第pdx项
+	if (pgdir[pdx] & PTE_P) {	// 页目录的第pdx项有效
 		physaddr_t pt_pa = PTE_ADDR(pgdir[pdx]);	// 该PDE项的高20位表示PT的起始物理地址的高20位
 		physaddr_t pte_pa = pt_pa + ptx * sizeof(pte_t);	// 找到该PT的第ptx项的物理地址
 		pte_t *pte_va = (pte_t *) KADDR(pte_pa);	// 把PTE的物理地址转换成虚拟地址
@@ -485,7 +545,7 @@ boot_map_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm
 {
 	// Fill this function in
 
-	// [lab2-exercise1]
+	// [lab2-exercise4]
 	// 参考资料
 	// <https://blog.csdn.net/qhaaha/article/details/111430350>
 
@@ -517,7 +577,7 @@ boot_map_region(pde_t *pgdir, uintptr_t va, size_t size, physaddr_t pa, int perm
 // pp is re-inserted at the same virtual address in the same pgdir.
 // However, try not to distinguish this case in your code, as this
 // frequently leads to subtle bugs; there's an elegant way to handle
-// everything in one code path.
+// everything in one code path.		one code path应该是说不要用if-else条件判断。
 //
 // RETURNS:
 //   0 on success
@@ -532,7 +592,7 @@ page_insert(pde_t *pgdir, struct PageInfo *pp, void *va, int perm)
 	// Fill this function in
 	// return 0;
 
-	// [lab2-exercise1]
+	// [lab2-exercise4]
 	// 参考资料
 	// <https://blog.csdn.net/qhaaha/article/details/111430350>
 
@@ -571,12 +631,12 @@ page_lookup(pde_t *pgdir, void *va, pte_t **pte_store)
 	// Fill this function in
 	// return NULL;
 
-	// [lab2-exercise1]
+	// [lab2-exercise4]
 	// 参考资料
 	// <https://blog.csdn.net/qhaaha/article/details/111430350>
 
 	pte_t *pte_va = pgdir_walk(pgdir, va, 0);
-	if (pte_va && *pte_va) {	// 能找到pte项且其中记录的物理页地址有效
+	if (pte_va && (*pte_va & PTE_P)) {	// 能找到pte项且其中记录的物理页地址有效
 		if (pte_store) {	// 如果指针pte_store不为NULL，就把pte_va存到该指针
 			*pte_store = pte_va;
 		}
@@ -606,7 +666,7 @@ page_remove(pde_t *pgdir, void *va)
 {
 	// Fill this function in
 
-	// [lab2-exercise1]
+	// [lab2-exercise4]
 	// 参考资料
 	// <https://blog.csdn.net/qhaaha/article/details/111430350>
 	
@@ -616,7 +676,7 @@ page_remove(pde_t *pgdir, void *va)
 		return;
 	}
 	page_decref(va_page);	// va映射到的物理页的ref减少（如果减为0就释放）
-	*pte = 0;	// 去除va的映射
+	memset(pte, 0, sizeof(pte_t));	// 去除va的映射
 	tlb_invalidate(pgdir, va);	// tlb中也去除va的映射（如果有的话）
 }
 

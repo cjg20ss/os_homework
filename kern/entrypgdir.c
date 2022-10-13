@@ -17,6 +17,10 @@ pte_t entry_pgtable[NPTENTRIES];
 // related to linking and static initializers, we use "x + PTE_P"
 // here, rather than the more standard "x | PTE_P".  Everywhere else
 // you should use "|" to combine flags.
+
+// __attribute__((__aligned__(PGSIZE))) 的含义
+// <https://blog.csdn.net/nankai0912678/article/details/105055752>
+
 __attribute__((__aligned__(PGSIZE)))
 pde_t entry_pgdir[NPDENTRIES] = {
 	// Map VA's [0, 4MB) to PA's [0, 4MB)
